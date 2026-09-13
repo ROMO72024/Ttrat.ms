@@ -1,10 +1,7 @@
 package ps.ghars.sessions;
 
 import android.app.Activity;
-import android.content.BroadcastReceiver;
-import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -20,15 +17,24 @@ import android.widget.TextView;
 import android.widget.ScrollView;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Set;
+import java.util.WeakHashMap;
 
 /** Lock-screen-safe controls never reveal student names or session notes. */
 public final class AlarmActivity extends Activity {
-    private final BroadcastReceiver closed = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) { finish(); }
-    };
+    // Activity and Service lifecycle callbacks run on the main thread in this process.
+    // Weak entries do not keep a destroyed screen alive, including during recreation.
+    private static final Set<AlarmActivity> openScreens = Collections.newSetFromMap(new WeakHashMap<>());
+
+    static void closeRingingScreens() {
+        for (AlarmActivity screen : new ArrayList<>(openScreens)) screen.finish();
+    }
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         if (!RingingService.isRinging) { finish(); return; }
+        openScreens.add(this);
         if (Build.VERSION.SDK_INT >= 27) { setShowWhenLocked(true); setTurnScreenOn(true); }
         else getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | WindowManager.LayoutParams.FLAG_SECURE);
@@ -52,8 +58,6 @@ public final class AlarmActivity extends Activity {
         });
         scroll.addView(layout, new ScrollView.LayoutParams(-1, -1));
         setContentView(scroll);
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(closed, new IntentFilter(RingingService.ACTION_CLOSED), Context.RECEIVER_NOT_EXPORTED);
-        else registerReceiver(closed, new IntentFilter(RingingService.ACTION_CLOSED));
     }
     private void action(String action) { startService(new Intent(this, RingingService.class).setAction(action)); finish(); }
     private void text(LinearLayout root, String value, int size, int color, int margin) {
@@ -69,5 +73,5 @@ public final class AlarmActivity extends Activity {
     }
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
     @Override public void onBackPressed() { moveTaskToBack(true); }
-    @Override public void onDestroy() { try { unregisterReceiver(closed); } catch (IllegalArgumentException ignored) { } super.onDestroy(); }
+    @Override public void onDestroy() { openScreens.remove(this); super.onDestroy(); }
 }

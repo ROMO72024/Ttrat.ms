@@ -80,7 +80,7 @@ public final class MainActivity extends Activity {
         root.addView(web, new FrameLayout.LayoutParams(-1, -1));
         lockScreen = new LinearLayout(this); lockScreen.setOrientation(LinearLayout.VERTICAL); lockScreen.setGravity(Gravity.CENTER);
         lockScreen.setPadding(32, 32, 32, 32); lockScreen.setBackgroundColor(0xFFFAF8F4); lockScreen.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        TextView title = new TextView(this); title.setText("غرس • مساحة الأخصائية"); title.setTextSize(25); title.setTextColor(0xFF981765); title.setGravity(Gravity.CENTER); lockScreen.addView(title);
+        TextView title = new TextView(this); title.setText("أخصائية غرس"); title.setTextSize(25); title.setTextColor(0xFF981765); title.setGravity(Gravity.CENTER); lockScreen.addView(title);
         TextView detail = new TextView(this); detail.setText("افتحي قفل الجهاز للوصول إلى ملفات الطلاب"); detail.setTextSize(16); detail.setGravity(Gravity.CENTER); detail.setPadding(0, 28, 0, 28); lockScreen.addView(detail);
         Button unlock = new Button(this); unlock.setText("فتح التطبيق"); unlock.setAllCaps(false); unlock.setOnClickListener(v -> { authCancelled = false; unlock(); }); lockScreen.addView(unlock);
         root.addView(lockScreen, new FrameLayout.LayoutParams(-1, -1));

@@ -34,7 +34,6 @@ public final class RingingService extends Service {
     static final String ACTION_RING = "ps.ghars.sessions.RING";
     static final String ACTION_DISMISS = "ps.ghars.sessions.DISMISS";
     static final String ACTION_SNOOZE = "ps.ghars.sessions.SNOOZE";
-    static final String ACTION_CLOSED = "ps.ghars.sessions.ALARM_CLOSED";
     static final String CHANNEL = "ghars_ringing_v1";
     static final int ID = 7301;
     static volatile boolean isRinging;
@@ -168,7 +167,7 @@ public final class RingingService extends Service {
         if (vibrator != null) vibrator.cancel();
         if (audioFocus != null) getSystemService(AudioManager.class).abandonAudioFocusRequest(audioFocus);
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-        sendBroadcast(new Intent(ACTION_CLOSED).setPackage(getPackageName()));
+        AlarmActivity.closeRingingScreens();
         super.onDestroy();
     }
 
