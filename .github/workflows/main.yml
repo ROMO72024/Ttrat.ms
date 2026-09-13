@@ -1,0 +1,110 @@
+name: Build APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      signed_release:
+        description: 'Build a signed release APK (requires the four signing secrets)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghars-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build platform
+        run: sdkmanager 'platforms;android-35' 'build-tools;34.0.0'
+
+      - name: Set up Gradle and validate wrapper
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make wrapper executable
+        run: chmod +x gradlew
+
+      - name: Test scheduling and student calculations
+        run: node --test tests/*.test.js
+
+      - name: Check and build debug APK
+        run: ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug
+
+      - name: Upload installable debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghars-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Android check reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghars-check-reports
+          path: app/build/reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Restore private release signing key
+        if: github.event_name == 'workflow_dispatch' && inputs.signed_release
+        env:
+          KEYSTORE_BASE64: ${{ secrets.GHARS_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.GHARS_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.GHARS_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.GHARS_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo 'Missing signing secrets. See docs/SIGNING.md.'
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/ghars-release.jks"
+
+      - name: Build signed release APK
+        if: github.event_name == 'workflow_dispatch' && inputs.signed_release
+        env:
+          GHARS_KEYSTORE_FILE: ${{ runner.temp }}/ghars-release.jks
+          GHARS_STORE_PASSWORD: ${{ secrets.GHARS_STORE_PASSWORD }}
+          GHARS_KEY_ALIAS: ${{ secrets.GHARS_KEY_ALIAS }}
+          GHARS_KEY_PASSWORD: ${{ secrets.GHARS_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon lintRelease assembleRelease
+
+      - name: Upload signed release APK
+        if: github.event_name == 'workflow_dispatch' && inputs.signed_release
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghars-signed-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove temporary private key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ghars-release.jks"
