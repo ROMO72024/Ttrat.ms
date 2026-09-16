@@ -50,7 +50,7 @@ public class SyncModelTest {
         current.getJSONArray("students").getJSONObject(0).put("name","تعديل الهاتف");remote.getJSONArray("students").getJSONObject(0).put("name","تعديل الشيت");
         JSONObject result=SyncModel.apply(sent,current,response(remote));assertEquals("تعديل الهاتف",result.getJSONArray("students").getJSONObject(0).getString("name"));
         assertTrue(result.getJSONObject("_cloud").getJSONObject("conflicts").has("student:s1|name"));
-        JSONArray retry=SyncModel.requestRecords(result);assertEquals("تعديل الشيت",retry.getJSONObject(0).getJSONObject("values").getString("name"));
+        JSONArray retry=SyncModel.requestRecords(result);assertEquals(0,retry.length());
     }
     @Test public void serverConflictKeepsLocalValueUntilExplicitResolution() throws Exception {
         JSONObject sent=withBase(state()),current=SyncModel.copy(sent),remote=SyncModel.copy(sent);
@@ -87,5 +87,36 @@ public class SyncModelTest {
         JSONObject local=state(),r=response(local);r.getJSONArray("records").remove(0);
         try{SyncModel.apply(local,local,r);fail("must reject missing student");}catch(Exception expected){assertTrue(expected.getMessage().contains("غير مكتمل"));}
         assertEquals(1,local.getJSONArray("students").length());
+    }
+    @Test public void accountantReductionFrom20To10IsPulledAndNeverEchoedBack() throws Exception {
+        JSONObject local=withBase(state()),remote=SyncModel.copy(local);
+        remote.getJSONArray("students").getJSONObject(0).getJSONObject("plans").getJSONObject("speech").put("total",10);
+        assertEquals(0,SyncModel.requestRecords(local).length());
+        JSONObject result=SyncModel.applyPull(local,local,response(remote));
+        assertEquals(10,result.getJSONArray("students").getJSONObject(0).getJSONObject("plans").getJSONObject("speech").getInt("total"));
+        assertEquals(0,SyncModel.requestRecords(result).length());
+        JSONObject again=SyncModel.apply(result,result,response(remote));
+        assertEquals(10,again.getJSONArray("students").getJSONObject(0).getJSONObject("plans").getJSONObject("speech").getInt("total"));
+    }
+    @Test public void pullingKeepsUnsentNamesAndOtherFieldEditsWithoutOverwritingAccountant() throws Exception {
+        JSONObject before=withBase(state()),current=SyncModel.copy(before),remote=SyncModel.copy(before);
+        current.getJSONArray("students").getJSONObject(0).put("phone","0591111111");
+        current.getJSONArray("students").put(student("newLocal"));
+        remote.getJSONArray("students").getJSONObject(0).getJSONObject("plans").getJSONObject("speech").put("total",10);
+        JSONObject result=SyncModel.applyPull(current,current,response(remote));
+        assertEquals(2,result.getJSONArray("students").length());
+        JSONObject students=SyncModel.index(result.getJSONArray("students"));
+        assertEquals("0591111111",students.getJSONObject("s1").getString("phone"));
+        assertEquals(10,students.getJSONObject("s1").getJSONObject("plans").getJSONObject("speech").getInt("total"));
+        assertEquals(2,SyncModel.requestRecords(result).length());
+    }
+    @Test public void simultaneousPullConflictKeepsBothValuesAndDoesNotUploadOldCount() throws Exception {
+        JSONObject before=withBase(state()),current=SyncModel.copy(before),remote=SyncModel.copy(before);
+        current.getJSONArray("students").getJSONObject(0).getJSONObject("plans").getJSONObject("speech").put("total",25);
+        remote.getJSONArray("students").getJSONObject(0).getJSONObject("plans").getJSONObject("speech").put("total",10);
+        JSONObject result=SyncModel.applyPull(current,current,response(remote));
+        JSONObject conflict=result.getJSONObject("_cloud").getJSONObject("conflicts").getJSONObject("student:s1|speechTotal");
+        assertEquals(25,conflict.getInt("local"));assertEquals(10,conflict.getInt("remote"));
+        assertEquals(0,SyncModel.requestRecords(result).length());
     }
 }

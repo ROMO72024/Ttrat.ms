@@ -7,17 +7,19 @@ def releaseStorePassword = System.getenv('GHARS_STORE_PASSWORD')
 def releaseKeyAlias = System.getenv('GHARS_KEY_ALIAS')
 def releaseKeyPassword = System.getenv('GHARS_KEY_PASSWORD')
 def hasReleaseSigning = releaseKeyFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+def parallelInstall = System.getenv('GHARS_PARALLEL_INSTALL') == 'true'
 
 android {
     namespace 'ps.ghars.sessions'
     compileSdk 35
 
     defaultConfig {
-        applicationId 'ps.ghars.sessions'
+        applicationId parallelInstall ? 'ps.ghars.sessions.transfer' : 'ps.ghars.sessions'
+        manifestPlaceholders = [gharsAppLabel: parallelInstall ? 'أخصائية غرس · المزامنة' : 'أخصائية غرس']
         minSdk 26
         targetSdk 35
-        versionCode 4
-        versionName '1.1.0'
+        versionCode 5
+        versionName '1.1.1'
     }
 
     if (hasReleaseSigning) {

@@ -9,6 +9,9 @@ function fixture(){
     setValues(rows){assert.equal(rows.length,this.height);rows.forEach((row,y)=>{assert.equal(row.length,this.width);row.forEach((v,x)=>new Range(this.sheet,this.row+y,this.col+x).setValue(v));});return this;}
     setValue(value){const row=this.sheet.rows[this.row-1]||(this.sheet.rows[this.row-1]=[]),key=this.row+':'+this.col;delete this.sheet.formulas[key];if(typeof value==='string'&&value.startsWith("'"))value=value.slice(1);else if(typeof value==='string'&&value.startsWith('='))this.sheet.formulas[key]=value;row[this.col-1]=value;return this;}
     setNumberFormat(){return this;}setBackground(){return this;}setFontColor(){return this;}setFontWeight(){return this;}setWrap(){return this;}setDataValidation(){return this;}
+    copyFormatToRange(){return this;}
+    getDataValidations(){return Array.from({length:this.height},()=>Array(this.width).fill(null));}
+    setDataValidations(rows){assert.equal(rows.length,this.height);assert(rows.every(r=>r.length===this.width));return this;}
     protect(){const self={getDescription:()=>'',setDescription:()=>self,addEditor(){},removeEditors(){},getEditors:()=>[],canDomainEdit:()=>false};return self;}
   }
   class Sheet{
@@ -16,6 +19,21 @@ function fixture(){
     getName(){return this.name;}getLastRow(){let n=this.rows.length;while(n>0&&!(this.rows[n-1]||[]).some(x=>x!==''&&x!==undefined))n--;return n;}
     getRange(row,col,height,width){if(typeof row==='string')return new Range(this,1,1,this.maxRows,1);return new Range(this,row,col,height,width);}
     getMaxRows(){return this.maxRows;}getMaxColumns(){return this.maxCols;}insertRowsAfter(_,n){this.maxRows+=n;}insertColumnsAfter(_,n){this.maxCols+=n;}
+    insertRowsBefore(before,n){
+      this.rows.splice(before-1,0,...Array.from({length:n},()=>[]));this.maxRows+=n;
+      const moved={};for(const [key,value]of Object.entries(this.formulas)){const [row,col]=key.split(':').map(Number);moved[(row>=before?row+n:row)+':'+col]=value;}this.formulas=moved;
+    }
+    moveRows(range,destination){
+      assert(destination<=range.row,'Fixture models moving rows upwards');
+      const start=range.row-1,at=destination-1,n=range.height;
+      const block=this.rows.splice(start,n);this.rows.splice(at,0,...block);
+      const moved={};for(const [key,value]of Object.entries(this.formulas)){
+        let [row,col]=key.split(':').map(Number);
+        if(row>=range.row&&row<range.row+n)row=destination+(row-range.row);
+        else if(row>=destination&&row<range.row)row+=n;
+        moved[row+':'+col]=value;
+      }this.formulas=moved;
+    }
     setRightToLeft(){return this;}setFrozenRows(){return this;}setRowHeight(){}setColumnWidth(){}hideColumns(){}hideSheet(){}getProtections(){return [];}
   }
   const book={getId:()=> 'book',getSheetByName:n=>sheets[n],insertSheet:n=>(sheets[n]=new Sheet(n,[]))};
@@ -47,9 +65,54 @@ test('same code on two phones identifies the same immutable workspace; other cod
 test('changing a plain code retains the workspace and data, rejects old code',()=>{const f=fixture();f.sync([student()]);f.accounts.rows[1][2]='NEW5678';assert.throws(()=>f.login('001234'),/الكود غير صحيح/);assert.equal(f.login('NEW5678').account.id,'accountA');const r=f.sync([],'NEW5678','accountA');assert.equal(r.records[0].values.name,'أحمد محمد علي');assert.equal(f.students.rows[1][2],'NEW5678');});
 test('disabled and duplicate codes fail without returning private data',()=>{const f=fixture();f.accounts.rows[1][3]=false;assert.throws(()=>f.login(),/الكود غير صحيح/);f.accounts.rows[2][2]='001234';assert.throws(()=>f.login(),/مكرر/);});
 test('repeated 150-student import and lost-response retry never duplicate IDs',()=>{const f=fixture(),records=Array.from({length:150},(_,i)=>student('s'+i,{name:'طالب اختبار '+i}));const first=f.sync(records);assert.equal(first.records.length,150);const retried=f.sync(records);assert.equal(retried.records.length,150);assert.equal(retried.conflicts.length,0);assert.equal(f.students.getLastRow(),151);assert.equal(f.data.getLastRow(),151);});
+test('1000 prefilled checkbox rows do not put new students at row 1001',()=>{
+  const f=fixture();for(let row=2;row<=1000;row++)f.students.getRange(row,12).setValue(false);
+  assert.equal(f.students.getLastRow(),1000);
+  f.sync([student('first')]);assert.equal(f.students.rows[1][1],'first');
+  const firstSnapshot=clone(f.students.rows[1]);
+  f.sync([student('second',{name:'أحدث اسم'})]);
+  assert.equal(f.students.rows[1][1],'second');assert.equal(f.students.rows[2][1],'first');
+  assert.equal(f.students.rows[2][3],firstSnapshot[3]);
+  f.sync([student('second',{name:'أحدث اسم'})]);
+  assert.equal(f.students.rows.filter(r=>r[1]==='second').length,1);
+  assert.equal(f.students.rows[1][1],'second');
+});
+test('batch import appears directly under headers newest first and retry preserves row order',()=>{
+  const f=fixture();for(let row=2;row<=1000;row++)f.students.getRange(row,12).setValue(false);
+  const records=Array.from({length:150},(_,i)=>student('s'+i,{name:'طالب '+i}));
+  f.sync(records);const ids=f.students.rows.slice(1,151).map(r=>r[1]);
+  assert.equal(ids[0],'s149');assert.equal(ids[149],'s0');
+  f.sync(records);assert.deepEqual(f.students.rows.slice(1,151).map(r=>r[1]),ids);
+  assert.equal(f.students.rows.filter(r=>r[1]).length,151); // header plus 150 students
+});
+test('existing bottom rows move to the top with IDs and formulas intact; rerun is harmless',()=>{
+  const f=fixture();for(let row=2;row<=1000;row++)f.students.getRange(row,12).setValue(false);
+  f.students.getRange(1001,1,1,4).setValues([['accountA','old','001234','اسم موجود أسفل الورقة']]);
+  f.students.getRange(1001,19).setValue('=1+1');
+  f.students.getRange(1003,1,1,4).setValues([['accountB','other','B56789','اسم أخصائية أخرى']]);
+  f.context.arrangeGharsStudents();
+  assert.equal(f.students.rows[1][1],'old');assert.equal(f.students.rows[2][1],'other');assert.equal(f.students.formulas['2:19'],'=1+1');
+  const before=JSON.stringify(f.students.rows);f.context.arrangeGharsStudents();assert.equal(JSON.stringify(f.students.rows),before);
+});
 test('completed attendance is derived once from shared session IDs, not overwritten by a second empty phone',()=>{const f=fixture();f.sync([student(),session()]);assert.equal(f.students.rows[1][12],1);assert.equal(f.students.rows[1][14],19);f.sync([],'001234','accountA','phone2');assert.equal(f.students.rows[1][12],1);f.sync([student(),session()]);assert.equal(f.students.rows[1][12],1);});
 test('accountant adds code + full name + 20 credits; defaults safely reach the correct account',()=>{const f=fixture();f.students.rows.push(['','','B56789','مريم أحمد محمود',20,'','','','','','',false]);const b=f.sync([],'B56789','accountB');assert.equal(b.records.length,1);assert.equal(b.records[0].values.speechTotal,20);assert.equal(b.records[0].values.notes,'');assert(f.students.rows[1][1].startsWith('st_'));assert.equal(f.sync([]).records.length,0);});
 test('phone weekly-plan edit and accountant purchased-credit edit merge independently',()=>{const f=fixture(),base=f.sync([student()]).records[0];f.students.rows[1][4]=30;const r=f.sync([editing(base,{speechWeekly:3})]);assert.equal(r.records[0].values.speechTotal,30);assert.equal(r.records[0].values.speechWeekly,3);assert.equal(r.conflicts.length,0);});
+test('accountant changes 20 to 10; unchanged phone snapshot cannot restore 20',()=>{
+  const f=fixture(),base=f.sync([student()]).records[0];f.students.rows[1][4]=10;
+  const r=f.sync([editing(base)]);assert.equal(r.records[0].values.speechTotal,10);assert.equal(f.students.rows[1][4],10);
+  f.sync([editing(base)]);assert.equal(f.students.rows[1][4],10);
+});
+test('pull ignores supplied phone values even when they claim an update from 10 to 20',()=>{
+  const f=fixture();f.sync([student()]);f.students.rows[1][4]=10;
+  const old=student();old.base={...old.values,speechTotal:10};
+  const r=f.request({action:'pull',serverId:'school-one',accountId:'accountA',records:[old]});
+  assert.equal(r.records[0].values.speechTotal,10);assert.equal(f.students.rows[1][4],10);
+});
+test('a phone edit to a different field cannot restore the old 20-session purchase',()=>{
+  const f=fixture(),base=f.sync([student()]).records[0];f.students.rows[1][4]=10;
+  const r=f.sync([editing(base,{phone:'0591111111'})]);assert.equal(r.records[0].values.speechTotal,10);assert.equal(r.records[0].values.phone,'0591111111');
+  assert.equal(f.students.rows[1][4],10);
+});
 test('competing edits to the same field remain conflicts; no last-clock-wins overwrite',()=>{const f=fixture(),base=f.sync([student()]).records[0];f.students.rows[1][4]=30;const r=f.sync([editing(base,{speechTotal:25})]);assert.equal(r.records[0].values.speechTotal,30);assert.deepEqual(r.conflicts,[{id:'student:s1',field:'speechTotal'}]);assert.equal(f.students.rows[1][4],30);});
 test('second phone session edit merges, repeated attendance never consumes extra credit',()=>{const f=fixture(),start=f.sync([student(),session()]);const base=start.records.find(r=>r.id==='session:x1');f.sync([editing(base,{note:'ملاحظة هاتف ثانٍ'})],'001234','accountA','phone2');const r=f.sync([editing(base,{duration:45})]);const s=r.records.find(r=>r.id==='session:x1');assert.equal(s.values.note,'ملاحظة هاتف ثانٍ');assert.equal(s.values.duration,45);assert.equal(f.students.rows[1][12],1);});
 test('malformed / orphan session or duplicate IDs cannot mutate stored data',()=>{const f=fixture();f.sync([student()]);const before=JSON.stringify(f.data.rows);assert.throws(()=>f.sync([session('orphan',{studentIds:['missing'],attendance:{missing:{status:'present',note:'',progress:0}}})]),/غير موجود/);assert.throws(()=>f.sync([student(),student()]),/مكرر/);assert.equal(JSON.stringify(f.data.rows),before);});

@@ -101,6 +101,8 @@ final class SyncModel {
             JSONObject record = records.getJSONObject(i); String id = record.getString("id");
             JSONObject values = record.getJSONObject("values"), prior = base.optJSONObject(id);
             for (String field : keys(values)) if (conflicts.has(id + "|" + field) && prior != null) values.put(field, prior.get(field));
+            // Downloading a change must not make an untouched record an upload.
+            if (prior != null && same(values, prior)) continue;
             result.put(new JSONObject().put("id", id).put("values", values).put("base", prior == null ? JSONObject.NULL : prior));
         }
         return result;
@@ -126,6 +128,12 @@ final class SyncModel {
         return count;
     }
     static JSONObject apply(JSONObject sent, JSONObject current, JSONObject response) throws Exception {
+        return apply(sent, current, response, false);
+    }
+    static JSONObject applyPull(JSONObject sent, JSONObject current, JSONObject response) throws Exception {
+        return apply(sent, current, response, true);
+    }
+    private static JSONObject apply(JSONObject sent, JSONObject current, JSONObject response, boolean pullOnly) throws Exception {
         JSONObject result = copy(current), meta = copy(object(current, "_cloud")), base = copy(object(meta, "base"));
         JSONObject conflicts = copy(object(meta, "conflicts")), oldBase = object(object(sent, "_cloud"), "base");
         JSONObject before = index(records(sent)), now = index(records(result));
@@ -143,7 +151,8 @@ final class SyncModel {
                 JSONObject snapshot = before.has(id) ? before.getJSONObject(id).getJSONObject("values") : new JSONObject();
                 if (!keys(local).equals(keys(values))) throw new Exception("حقول رد المزامنة غير متوافقة؛ لم تُستبدل البيانات");
                 for (String field : keys(values)) {
-                    String key = id + "|" + field; Object l = local.get(field), r = values.get(field), was = snapshot.opt(field);
+                    String key = id + "|" + field; Object l = local.get(field), r = values.get(field);
+                    Object was = pullOnly ? object(oldBase, id).opt(field) : snapshot.opt(field);
                     boolean changedInFlight = !same(l, was);
                     boolean conflict = conflicts.has(key) || rejected.contains(key) ||
                         (changedInFlight && !same(r, was) && !same(r, object(oldBase, id).opt(field)));
@@ -157,7 +166,8 @@ final class SyncModel {
         }
         // A response omitting a sent record must not be acknowledged as a complete sync.
         JSONObject remoteIds = index(remote);
-        for (String id : keys(before)) if (!remoteIds.has(id)) throw new Exception("رد المزامنة غير مكتمل؛ بقيت بيانات الجهاز محفوظة");
+        for (String id : keys(before)) if (!remoteIds.has(id) && (!pullOnly || oldBase.has(id)))
+            throw new Exception("رد المزامنة غير مكتمل؛ بقيت بيانات الجهاز محفوظة");
         JSONArray students = new JSONArray(), sessions = new JSONArray();
         for (String key : keys(now)) {
             JSONObject values = now.getJSONObject(key).getJSONObject("values"); String id = key.substring(key.indexOf(':') + 1);

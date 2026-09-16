@@ -22,6 +22,8 @@ test('native login gate, wrong code, explicit legacy binding, sync consent and l
   submit('001234');context.onCloudLogin(true,{accountName:'أخصائية اختبار',legacyStudents:150,offline:false});assert(nodes['modal-root'].innerHTML.includes('150'));assert(!loggedIn);assert(!calls.includes('enable'));
   click('confirm-action');assert(loggedIn);assert(nodes.app.innerHTML.includes('اسم قديم خاص'));assert(!enabled);
   click('go-settings');assert(nodes.app.innerHTML.includes('رفع الأسماء الحالية وتفعيل المزامنة'));click('cloud-enable');assert(!enabled);click('confirm-action');assert(enabled);
+  assert(nodes.app.innerHTML.includes('جلب تعديلات الشيت'));
+  const beforePull=calls.length;click('cloud-pull');assert.deepEqual(calls.slice(beforePull),['pull']);
   click('cloud-logout');assert(loggedIn);click('confirm-action');assert(!loggedIn);assert(nodes.app.innerHTML.includes('كود الأخصائية'));assert(!nodes.app.innerHTML.includes('اسم قديم خاص'));assert.equal(state.students.length,1);assertCodeOnly();
   submit('001234');assert.equal(selected,'001234');assert.equal(selectedUrl,bundledUrl);context.onCloudLogin(true,{accountName:'أخصائية اختبار',legacyStudents:0,offline:true});assert(nodes['modal-root'].innerHTML.includes('دون إنترنت'));click('confirm-action');assert(loggedIn);assert(nodes.app.innerHTML.includes('اسم قديم خاص'));
 });

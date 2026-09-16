@@ -1,5 +1,5 @@
 /**
- * GHARS Sync 1.1.0 / protocol 2 — multiple specialist spaces and multiple phones.
+ * GHARS Sync 1.1.1 / protocol 2 — new student rows appear at the top.
  * Bound to a NEW private Google Sheet. Run setupGharsSync, then deploy a Web app.
  * Specialist codes are PLAIN TEXT in the accounts tab, as requested.
  * The whole workbook must only be shared with trusted management/accounting staff.
@@ -16,7 +16,8 @@ const GHARS_SYNC=Object.freeze({
 function onOpen(){
   SpreadsheetApp.getUi().createMenu('غرس · المزامنة')
     .addItem('١. تهيئة النظام','setupGharsSync').addItem('٢. عرض رابط التطبيق','showGharsConnection')
-    .addItem('فحص الحسابات والطلاب','checkGharsSheet').addToUi();
+    .addItem('فحص الحسابات والطلاب','checkGharsSheet')
+    .addItem('نقل الأسماء الموجودة إلى أعلى الورقة','arrangeGharsStudents').addToUi();
 }
 function fail_(code,message){const e=new Error(message);e.code=code;e.publicMessage=message;throw e;}
 function json_(value){return ContentService.createTextOutput(JSON.stringify(value)).setMimeType(ContentService.MimeType.JSON);}
@@ -183,6 +184,45 @@ function append_(sheet,rows,columns){
   if(sheet.getRange(start,1,rows.length,columns).getValues().some(r=>r.some(v=>v!==''&&v!==false)))fail_('BUSY','أضيفت بيانات أثناء الكتابة. أعد المحاولة.');
   sheet.getRange(start,1,rows.length,columns).setValues(rows);
 }
+function prependStudents_(sheet,rows){
+  if(!rows.length)return;
+  // Unchecked checkboxes are FALSE values, so getLastRow() can be 1000
+  // even when no student exists. New registrations always start at row 2.
+  if(sheet.getMaxRows()<2)sheet.insertRowsAfter(1,1);
+  const count=rows.length;
+  sheet.insertRowsBefore(2,count);
+  const template=sheet.getRange(count+2,1,1,18),target=sheet.getRange(2,1,count,18);
+  template.copyFormatToRange(sheet,1,18,2,count+1);
+  const validation=template.getDataValidations()[0];
+  target.setDataValidations(Array.from({length:count},()=>validation.slice()));
+  sheet.getRange(2,1,count,4).setNumberFormat('@');
+  sheet.getRange(2,7,count,3).setNumberFormat('@');
+  // Newer items are appended to the phone's list: display them first in the sheet.
+  target.setValues(rows.slice().reverse());
+}
+function arrangeGharsStudents(){
+  const lock=LockService.getScriptLock();lock.waitLock(30000);
+  let count=0;
+  try{
+    const sheet=sheet_(GHARS_SYNC.students,GHARS_SYNC.studentHeaders),last=sheet.getLastRow();
+    if(last>1){
+      const columns=sheet.getMaxColumns(),range=sheet.getRange(2,1,last-1,columns);
+      const values=range.getValues(),formulas=range.getFormulas();
+      const occupied=values.map((r,i)=>r.some(x=>x!==''&&x!==false)||formulas[i].some(Boolean));
+      let destination=2;
+      for(let i=0;i<occupied.length;){
+        if(!occupied[i]){i++;continue;}
+        const start=i;while(i<occupied.length&&occupied[i])i++;
+        const length=i-start,source=start+2;
+        // Moving whole rows retains IDs, formulas, formatting and validation.
+        if(source!==destination)sheet.moveRows(sheet.getRange(source,1,length,columns),destination);
+        destination+=length;count+=length;
+      }
+      SpreadsheetApp.flush();
+    }
+  }finally{lock.releaseLock();}
+  SpreadsheetApp.getUi().alert('تم تجميع '+count+' صفاً يحتوي بيانات أعلى الورقة دون حذف أسماء أو تغيير معرّفاتها. الأسماء الجديدة ستظهر مباشرة تحت العناوين.');
+}
 function writeData_(data,accountId,records,stamp){
   const add=[];
   records.forEach((record,id)=>{
@@ -213,7 +253,7 @@ function writeGrid_(grid,account,records,stamp,conflicts){
       grid.sheet.getRange(old.row,i+4).setValue(editable[i]);
     });
   });
-  append_(grid.sheet,add,18);
+  prependStudents_(grid.sheet,add);
   // Technical columns only: batched to keep 150+ student imports fast.
   const n=Math.max(0,grid.sheet.getLastRow()-1);if(!n)return;
   const rows=grid.sheet.getRange(2,1,n,18).getValues(),technical=rows.map(r=>r.slice(12,18));
@@ -230,7 +270,7 @@ function checkGharsSheet(){
   try{const accounts=accounts_(),grid=grid_(accounts);SpreadsheetApp.getUi().alert('الحسابات: '+accounts.length+'\nالطلاب: '+grid.rows.length+'\nلا يتم حذف بيانات من الهاتف بهذا الفحص.');}
   finally{lock.releaseLock();}
 }
-function doGet(){return json_({ok:true,service:'Ghars Sync',protocol:2,message:'الدخول بالكود من تطبيق غرس. هذا الرابط لا يعرض الأسماء.'});}
+function doGet(){return json_({ok:true,service:'Ghars Sync',protocol:2,version:'1.1.1',message:'الدخول بالكود من تطبيق غرس. هذا الرابط لا يعرض الأسماء.'});}
 function doPost(event){
   try{
     const body=event&&event.postData&&event.postData.contents;if(!body||body.length>5*1024*1024)fail_('BAD_REQUEST','حجم الطلب غير صالح.');
@@ -238,13 +278,15 @@ function doPost(event){
   }catch(e){return json_({ok:false,code:e.code||'SERVER_ERROR',message:e.publicMessage||'تعذرت المزامنة. راجع إعدادات النشر وسلامة أوراق غرس.'});}
 }
 function handleRequest_(request){
-  if(!request||request.protocol!==2||!['login','sync'].includes(request.action)||!validId_(request.deviceId))fail_('PROTOCOL','نسخة التطبيق أو السكربت غير متوافقة.');
+  if(!request||request.protocol!==2||!['login','sync','pull'].includes(request.action)||!validId_(request.deviceId))fail_('PROTOCOL','نسخة التطبيق أو السكربت غير متوافقة.');
   const lock=LockService.getScriptLock();if(!lock.tryLock(25000))fail_('BUSY','مزامنة أخرى قيد التنفيذ. أعد المحاولة.');
   try{
     const accounts=accounts_(),account=authorize_(request,accounts),serverId=PropertiesService.getScriptProperties().getProperty('GHARS_SERVER_ID'),stamp=new Date().toISOString();
     const identity={ok:true,protocol:2,serverId,account:{id:account.id,name:account.name},serverTime:stamp};
     if(request.action==='login')return identity;
     if(request.serverId!==serverId||request.accountId!==account.id)fail_('BINDING','الكود يخص مساحة مختلفة. سجّل خروجاً وادخل بالكود الصحيح؛ لم تُنقل بياناتك.');
+    // Pull is enforced on the server: it cannot write phone values even if sent.
+    if(request.action==='pull')request=Object.assign({},request,{records:[]});
     if(!Array.isArray(request.records)||request.records.length>35000)fail_('LIMIT','عدد السجلات أكبر من الحد المسموح.');
     const incoming=new Map();request.records.forEach(r=>{
       if(!r||incoming.has(r.id))fail_('RECORD','سجل مكرر في طلب المزامنة.');

@@ -15,6 +15,11 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.time.Instant;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Optional native HTTPS synchronization; all screens and local operations remain offline. */
@@ -23,7 +28,33 @@ final class CloudSync {
     private static final AtomicBoolean RUNNING = new AtomicBoolean();
     private static final int JOB_ONCE = 47001, JOB_PERIODIC = 47002;
     private static volatile String message = "", error = "";
+    private static final ScheduledExecutorService DIRECT_WORKER = Executors.newSingleThreadScheduledExecutor();
+    private static AutoSyncQueue directQueue;
+    private static final AtomicBoolean PULL_QUEUED = new AtomicBoolean();
     private CloudSync() { }
+    private static synchronized void requestDirect(Context c, long delayMillis) {
+        final Context app = c.getApplicationContext();
+        if (directQueue == null) directQueue = new AutoSyncQueue((work, delay) -> {
+            ScheduledFuture<?> future = DIRECT_WORKER.schedule(work, delay, TimeUnit.MILLISECONDS);
+            return () -> future.cancel(false);
+        }, () -> run(app));
+        directQueue.request(delayMillis);
+    }
+    private static synchronized void cancelDirect() { if (directQueue != null) directQueue.cancel(); }
+    static void enqueuePull(Context c) {
+        if (!PULL_QUEUED.compareAndSet(false, true)) return;
+        final Context app = c.getApplicationContext();
+        // Serialize downloads with in-process uploads rather than racing HTTP requests.
+        DIRECT_WORKER.execute(() -> { try { pull(app); } finally { PULL_QUEUED.set(false); } });
+    }
+    static void syncNow(Context c) throws Exception {
+        synchronized (DATA_LOCK) {
+            JSONObject conf = config(c); ProfileStore.assertBinding(state(c), conf);
+            if (!conf.optBoolean("enabled") || conf.optBoolean("revoked"))
+                throw new Exception("المزامنة متوقفة. اضغطي تفعيل المزامنة أولاً");
+            requestDirect(c, 0);
+        }
+    }
     static JSONObject state(Context c) throws Exception { return SchemaValidator.validate(SecureStore.read(c, "state", SecureStore.EMPTY_STATE)); }
     private static JSONObject config(Context c) throws Exception { return ProfileStore.config(c); }
     static String schoolUrl(Context c) {
@@ -107,14 +138,17 @@ final class CloudSync {
                 .put("verified", !conf.optString("accountId").isEmpty()).put("enabled", conf.optBoolean("enabled"))
                 .put("accountName", conf.optString("accountName")).put("busy", RUNNING.get()).put("lastSync", meta.optString("lastSync"))
                 .put("pending", SyncModel.pending(current)).put("students", current.getJSONArray("students").length())
-                .put("conflicts", conflicts).put("overlaps", SyncModel.overlaps(current)).put("message", message).put("error", error).toString();
+                .put("syncedStudents", conf.optInt("syncedStudents", -1)).put("lastAttempt", conf.optString("lastAttempt"))
+                .put("errorCode", conf.optString("lastErrorCode"))
+                .put("conflicts", conflicts).put("overlaps", SyncModel.overlaps(current)).put("message", message)
+                .put("error", error.isEmpty() ? conf.optString("lastError") : error).toString();
         }} catch (Exception e) { return "{\"error\":\"تعذر قراءة حالة المزامنة؛ لم تتغير بياناتك\"}"; }
     }
     static void enable(Context c) throws Exception {
         synchronized (DATA_LOCK) {
             JSONObject conf = config(c); ProfileStore.assertBinding(state(c), conf);
             if (conf.optBoolean("revoked")) throw new Exception("راجعي الكود مع المحاسب ثم سجّلي الدخول من جديد");
-            conf.put("enabled", true); SecureStore.write(c, "cloud-config", conf.toString()); ProfileStore.remember(c, conf);
+            conf.put("enabled", true).put("lastError", "").put("lastErrorCode", ""); SecureStore.write(c, "cloud-config", conf.toString()); ProfileStore.remember(c, conf);
             message = "المزامنة مفعّلة؛ الملفات محفوظة محلياً إلى أن ينجح الاتصال."; error = "";
         }
         schedule(c, true);
@@ -161,16 +195,29 @@ final class CloudSync {
     static void schedule(Context c, boolean immediate) {
         try { synchronized (DATA_LOCK) {
             JSONObject conf = config(c); if (!conf.optBoolean("enabled") || conf.optBoolean("revoked")) return;
+            // Save/login/network recovery get an in-process attempt, even when Android
+            // delays or rejects background jobs. All HTTP work stays off the UI thread.
+            if (immediate) requestDirect(c, 1000);
             JobScheduler scheduler = c.getSystemService(JobScheduler.class); ComponentName service = new ComponentName(c, SyncJobService.class);
             if (scheduler.getPendingJob(JOB_PERIODIC) == null) scheduler.schedule(new JobInfo.Builder(JOB_PERIODIC, service)
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setPersisted(true).setPeriodic(15 * 60 * 1000L).build());
             if (immediate && scheduler.getPendingJob(JOB_ONCE) == null) scheduler.schedule(new JobInfo.Builder(JOB_ONCE, service)
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setPersisted(true).setMinimumLatency(3000)
                 .setBackoffCriteria(30000, JobInfo.BACKOFF_POLICY_EXPONENTIAL).build());
-        }} catch (Exception ignored) { error = "تعذرت جدولة المزامنة التلقائية. جرّبي المزامنة يدوياً."; }
+        }} catch (Exception ignored) { message = "قد تتأخر المزامنة في الخلفية؛ تستمر المحاولة المباشرة أثناء فتح التطبيق."; }
     }
-    private static void cancelJobs(Context c) { JobScheduler s = c.getSystemService(JobScheduler.class); s.cancel(JOB_ONCE); s.cancel(JOB_PERIODIC); }
+    private static void cancelJobs(Context c) {
+        cancelDirect();
+        try { JobScheduler s = c.getSystemService(JobScheduler.class); s.cancel(JOB_ONCE); s.cancel(JOB_PERIODIC); }
+        catch (Exception ignored) { /* Persisted enabled=false still prevents further work. */ }
+    }
     static boolean run(Context c) {
+        return transfer(c, false);
+    }
+    static boolean pull(Context c) {
+        return transfer(c, true);
+    }
+    private static boolean transfer(Context c, boolean pullOnly) {
         if (!RUNNING.compareAndSet(false, true)) return true;
         String generation = "";
         MainActivity.cloudChanged(false);
@@ -180,10 +227,12 @@ final class CloudSync {
                 conf = config(c); if (!conf.optBoolean("enabled") || conf.optBoolean("revoked")) return false;
                 snapshot = state(c); ProfileStore.assertBinding(snapshot, conf);
                 generation = conf.optString("generation");
+                conf.put("lastAttempt", Instant.now().toString());
+                SecureStore.write(c, "cloud-config", conf.toString());
             }
-            JSONObject request = new JSONObject().put("protocol", 2).put("action", "sync").put("deviceId", conf.getString("deviceId"))
+            JSONObject request = new JSONObject().put("protocol", 2).put("action", pullOnly ? "pull" : "sync").put("deviceId", conf.getString("deviceId"))
                 .put("code", conf.getString("code")).put("serverId", conf.getString("serverId")).put("accountId", conf.getString("accountId"))
-                .put("records", SyncModel.requestRecords(snapshot));
+                .put("records", pullOnly ? new JSONArray() : SyncModel.requestRecords(snapshot));
             JSONObject response = post(conf.getString("url"), request.toString());
             if (Thread.currentThread().isInterrupted()) return true;
             checkResponse(response);
@@ -194,12 +243,17 @@ final class CloudSync {
                     !conf.getString("accountId").equals(response.getJSONObject("account").getString("id")))
                     throw new Exception("رد المزامنة يخص مساحة مختلفة. لم تتغير ملفات الجهاز");
                 JSONObject latest = state(c); ProfileStore.assertBinding(latest, latestConfig);
-                JSONObject merged = SyncModel.apply(snapshot, latest, response);
+                JSONObject merged = pullOnly ? SyncModel.applyPull(snapshot, latest, response) : SyncModel.apply(snapshot, latest, response);
                 SecureStore.write(c, "state", merged.toString());
-                latestConfig.put("accountName", response.getJSONObject("account").getString("name"));
+                int syncedStudents = 0;
+                JSONArray received = response.getJSONArray("records");
+                for (int i = 0; i < received.length(); i++)
+                    if (received.getJSONObject(i).getString("id").startsWith("student:")) syncedStudents++;
+                latestConfig.put("accountName", response.getJSONObject("account").getString("name"))
+                    .put("syncedStudents", syncedStudents).put("lastError", "").put("lastErrorCode", "");
                 SecureStore.write(c, "cloud-config", latestConfig.toString()); ProfileStore.remember(c, latestConfig);
                 int count = SyncModel.object(SyncModel.object(merged, "_cloud"), "conflicts").length();
-                message = count > 0 ? "اكتملت المزامنة مع اختلافات تحتاج مراجعتك." : "اكتملت مزامنة مساحة الأخصائية.";
+                message = "آخر تأكيد من الشيت: " + syncedStudents + " ملف طالب." + (count > 0 ? " توجد اختلافات تحتاج مراجعتك." : "");
                 error = "";
                 try { AlarmScheduler.sync(c, AlarmScheduler.itemsForState(merged)); }
                 catch (Exception e) { error = "تزامنت البيانات؛ راجعي أذونات المنبه لتفعيل المواعيد الجديدة."; }
@@ -216,6 +270,13 @@ final class CloudSync {
             String detail = e.getMessage();
             error = detail != null && detail.matches("(?s).*[\\u0600-\\u06FF].*") ? detail :
                 "تعذر الاتصال بالشيت. بياناتك محفوظة محلياً وستُعاد المحاولة عند توفر الاتصال.";
+            try { synchronized (DATA_LOCK) {
+                JSONObject conf = config(c);
+                if (generation.equals(conf.optString("generation"))) {
+                    conf.put("lastError", error).put("lastErrorCode", e instanceof RemoteFailure ? ((RemoteFailure)e).code : "CONNECTION");
+                    SecureStore.write(c, "cloud-config", conf.toString());
+                }
+            }} catch (Exception ignored) { /* Do not replace student data to record an error. */ }
             message = ""; return true;
         } finally { RUNNING.set(false); MainActivity.cloudChanged(true); }
     }

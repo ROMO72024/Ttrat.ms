@@ -17,6 +17,7 @@ import android.media.RingtoneManager;
 import android.net.Uri;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Build;
@@ -72,11 +73,14 @@ public final class MainActivity extends Activity {
     private char[] pendingPassword;
     private String pendingReport, pendingImport;
     private final Handler syncHandler = new Handler(Looper.getMainLooper());
+    private void requestPull() {
+        if (cloudLoggedIn && !destroyed) CloudSync.enqueuePull(getApplicationContext());
+    }
     private final Runnable syncTick = new Runnable() {
         @Override public void run() {
             if (!visible || destroyed) return;
-            CloudSync.schedule(MainActivity.this, true);
-            syncHandler.postDelayed(this, 60000);
+            if (cloudLoggedIn && authenticated) requestPull();
+            syncHandler.postDelayed(this, 15000);
         }
     };
     private ConnectivityManager.NetworkCallback networkCallback;
@@ -103,6 +107,10 @@ public final class MainActivity extends Activity {
         RingingService.channels(this);
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(Network network) { CloudSync.schedule(getApplicationContext(), true); }
+            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+                    CloudSync.schedule(getApplicationContext(), true);
+            }
         };
         try { getSystemService(ConnectivityManager.class).registerDefaultNetworkCallback(networkCallback); }
         catch (Exception ignored) { networkCallback = null; }
@@ -278,7 +286,8 @@ public final class MainActivity extends Activity {
             try {
                 switch (action) {
                     case "enable": CloudSync.enable(MainActivity.this); break;
-                    case "sync": worker.execute(() -> CloudSync.run(getApplicationContext())); break;
+                    case "sync": CloudSync.syncNow(MainActivity.this); break;
+                    case "pull": requestPull(); break;
                     case "pause": CloudSync.pause(MainActivity.this); break;
                     default: return "عملية ربط غير معروفة";
                 }
