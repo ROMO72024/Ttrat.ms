@@ -1,0 +1,10 @@
+{
+  "packageName": "ps.ghars.sessions.debug",
+  "versionCode": 3,
+  "versionName": "1.0.2-debug",
+  "certificateSha256": "da5b6e4b964ed2f0d79d045b8c6e5de505ea6a156bdf3844b67ee907cbaa049e",
+  "apkSha256": "11f8208c09e9f5c70368d48bd2dc4465eef4655ad738a7e8293f89572036861e",
+  "signatureVerified": true,
+  "certificateSubject": "C=US,O=Android,CN=Android Debug",
+  "certificateCreatedAt": "2026-09-13T17:48:16Z"
+}

@@ -7,15 +7,17 @@ def releaseStorePassword = System.getenv('GHARS_STORE_PASSWORD')
 def releaseKeyAlias = System.getenv('GHARS_KEY_ALIAS')
 def releaseKeyPassword = System.getenv('GHARS_KEY_PASSWORD')
 def hasReleaseSigning = releaseKeyFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
-def parallelInstall = System.getenv('GHARS_PARALLEL_INSTALL') == 'true'
+// Actual package from the user's original app-debug.apk (versionCode 3).
+// Keep the namespace for Java classes; the install identity must match the APK.
+def legacyApplicationId = 'ps.ghars.sessions.debug'
 
 android {
     namespace 'ps.ghars.sessions'
     compileSdk 35
 
     defaultConfig {
-        applicationId parallelInstall ? 'ps.ghars.sessions.transfer' : 'ps.ghars.sessions'
-        manifestPlaceholders = [gharsAppLabel: parallelInstall ? 'أخصائية غرس · المزامنة' : 'أخصائية غرس']
+        applicationId legacyApplicationId
+        manifestPlaceholders = [gharsAppLabel: 'أخصائية غرس']
         minSdk 26
         targetSdk 35
         versionCode 5
@@ -35,7 +37,7 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix '.debug'
+            applicationIdSuffix '.preview'
             versionNameSuffix '-debug'
         }
         release {
