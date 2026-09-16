@@ -3,11 +3,10 @@
   const U=window.GharsUI, e=U.e, native=!!window.Native;
   const labels={name:'اسم الطالب',speechTotal:'إجمالي النطق',behaviorTotal:'إجمالي السلوك',classroom:'الصف',shift:'الفترة',phone:'الهاتف',speechWeekly:'النطق أسبوعياً',behaviorWeekly:'السلوك أسبوعياً',archived:'الأرشفة',notes:'ملاحظات الملف',goals:'الأهداف',start:'الموعد',duration:'المدة',type:'نوع الجلسة',reminderMinutes:'التذكير المسبق',status:'حالة الجلسة',note:'ملاحظات الجلسة',seriesId:'مجموعة التكرار',studentIds:'الطلاب المشاركون',attendance:'تسجيل الحضور'};
   let reviewSnapshot=[];
-  let loginBusy=false,loginError='',showUrl=false;
+  let loginBusy=false,loginError='';
   function needsLogin(){return native&&!Native.cloudIsLoggedIn();}
   function loginPage(){
-    let info={};try{info=JSON.parse(Native.cloudLoginInfo());}catch(_){}
-    return `<main class="cloud-login"><section class="cloud-login-card"><img src="logo.png" alt="شعار غرس"><p class="eyebrow">مدرسة وروضة غرس الحديثة</p><h1>أهلًا بكِ في مساحتك</h1><p class="subtitle">كود واحد. ملفاتك وجلساتك، حيثما كنتِ.</p><form id="cloud-login-form"><label for="cloud-login-code">كود الأخصائية</label><input id="cloud-login-code" name="code" type="password" minlength="5" maxlength="32" autocomplete="off" dir="ltr" placeholder="أدخلي الكود" required ${loginBusy?'disabled':''}><small>الحروف الإنجليزية والأرقام كما أُعطيت لكِ. الأكواد تتغير من الشيت.</small><div ${info.url&&!showUrl?'hidden':''}><label for="cloud-login-url">رابط المدرسة · إعداد أول مرة</label><input id="cloud-login-url" name="url" type="url" dir="ltr" value="${e(info.url||'')}" required placeholder="https://script.google.com/macros/s/…/exec"><small>الرابط نفسه لكل الأخصائيات. ليس رابط ملف Google Sheets.</small></div>${loginError?`<p class="cloud-error" role="alert">${e(loginError)}</p>`:''}<button type="submit" class="button primary" ${loginBusy?'disabled':''}>${loginBusy?'جارٍ التحقق…':'دخول إلى مساحتي'}</button></form>${info.url?'<button type="button" class="button ghost small" data-action="cloud-school-url">تعديل رابط المدرسة</button>':''}<p class="cloud-footnote">أول دخول يحتاج الإنترنت. بعدها يمكنك فتح المساحة التي سبق حفظها دون إنترنت. لكل كود مساحة مستقلة؛ ونفس الكود يفتح المساحة نفسها على هاتف آخر.</p></section></main>`;
+    return `<main class="cloud-login"><section class="cloud-login-card"><img src="logo.png" alt="شعار غرس"><p class="eyebrow">مدرسة وروضة غرس الحديثة</p><h1>أهلًا بكِ في مساحتك</h1><p class="subtitle">ملفاتك وجلساتك، في مكان واحد.</p><form id="cloud-login-form"><label for="cloud-login-code">كود الأخصائية</label><input id="cloud-login-code" name="code" type="password" minlength="5" maxlength="32" autocomplete="off" dir="ltr" placeholder="أدخلي الكود" required ${loginBusy?'disabled':''}><small>أدخلي الكود الذي أعطتكِ إياه إدارة غرس.</small>${loginError?`<p class="cloud-error" role="alert">${e(loginError)}</p>`:''}<button type="submit" class="button primary" ${loginBusy?'disabled':''}>${loginBusy?'جارٍ التحقق…':'دخول إلى مساحتي'}</button></form><p class="cloud-footnote">تحتاجين الإنترنت عند الدخول لأول مرة. بعدها يمكنك فتح مساحتك المحفوظة والعمل دون إنترنت.</p></section></main>`;
   }
   function status(){if(!native)return {conflicts:[],students:0};try{return JSON.parse(Native.cloudStatus());}catch(_){return {error:'تعذر قراءة حالة المزامنة',conflicts:[]};}}
   function call(action){const error=Native.cloudAction(action);if(error)throw Error(error);U.redraw();}
@@ -32,7 +31,6 @@
   function action(name,data){
     if(!native){U.notify('الربط متاح داخل تطبيق Android.',true);return;}
     switch(name){
-      case 'cloud-school-url':showUrl=true;U.redraw();break;
       case 'cloud-logout':U.confirmDialog('تسجيل الخروج؟','تبقى بيانات هذه المساحة محفوظة ولا تختلط بمساحة أخرى. تتوقف المزامنة حتى الدخول مجدداً.','تسجيل الخروج',()=>{const err=Native.cloudSignOut();if(err)throw Error(err);window.onCloudSignedOut();});break;
       case 'cloud-enable':{
         const s=status(); U.confirmDialog('تفعيل المزامنة؟',`ستُرفع ملفات هذه الأخصائية (${s.students||0} طالباً) والجلسات والحضور والملاحظات إلى مساحة الكود في الشيت، وتُجلب إضافات المحاسب والأجهزة الأخرى. هل حفظتِ نسخة احتياطية وتأكدتِ من صاحبة الكود؟`,'نعم، ارفعي وفعّلي',()=>{call('enable');U.notify('تفعّلت المزامنة؛ عند توفر الإنترنت يبدأ نقل البيانات.');});break;
@@ -64,8 +62,17 @@
   document.addEventListener('submit',event=>{
     if(event.target.id!=='cloud-login-form')return;event.preventDefault();if(loginBusy)return;
     const form=event.target;if(!form.reportValidity())return;
-    const url=form.elements.namedItem('url').value.trim(),code=form.elements.namedItem('code').value.trim();
-    loginBusy=true;loginError='';Native.cloudPrepareLogin(url,code);U.redraw();
+    const code=form.elements.namedItem('code').value.trim();
+    try {
+      // The native bridge reads the bundled school address, or the saved connection.
+      // Reading it here also works offline; the user supplies only her code.
+      const info=JSON.parse(Native.cloudLoginInfo());
+      const url=info&&typeof info.url==='string'?info.url.trim():'';
+      if(!url){loginError='اتصال المدرسة غير مُعدّ في هذه النسخة. تواصلي مع الإدارة لتحديث التطبيق.';U.redraw();return;}
+      loginBusy=true;loginError='';Native.cloudPrepareLogin(url,code);U.redraw();
+    }catch(_){
+      loginBusy=false;loginError='تعذر بدء تسجيل الدخول. أغلقي التطبيق وافتحيه مجددًا، ثم حاولي مرة أخرى.';U.redraw();
+    }
   });
   window.onCloudLogin=function(ok,summary){
     loginBusy=false;if(!ok){loginError=summary.message||'تعذر الدخول';U.redraw();return;}
