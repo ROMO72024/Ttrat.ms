@@ -37,11 +37,20 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Android SDK (no legacy tools)
+        uses: android-actions/setup-android@v4
+        with:
+          # Skip the default "tools platform-tools" package list.
+          packages: ''
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
 
-      - name: Install Android build platform
-        run: sdkmanager 'platforms;android-35' 'build-tools;34.0.0'
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;34.0.0"
 
       - name: Set up Gradle and validate wrapper
         uses: gradle/actions/setup-gradle@v4
