@@ -49,7 +49,7 @@ click('student-profile',ids[0]);assert(nodes.app.innerHTML.includes('&lt;script&
 click('student-session',ids[0]);assert(new RegExp('name="studentIds" value="'+ids[0]+'" checked').test(html()));assert.equal(inputValue('time'),'');click('modal-close');
 click('session-day','',{date:'2026-11-03'});assert.equal(inputValue('date'),'2026-11-03');assert.equal(inputValue('time'),'');click('modal-close');
 for(const page of ['home','schedule','students','reminders','settings']){click('navigate','',{page});assert(nodes.app.innerHTML.includes('page-footer'));}
-assert(!nodes.app.innerHTML.includes('default-reminder'));assert(nodes.app.innerHTML.includes('1.0.2'));assert(nodes.app.innerHTML.includes('تنبيه تلقائي عند بدء الجلسة'));
+assert(!nodes.app.innerHTML.includes('default-reminder'));assert(nodes.app.innerHTML.includes('1.1.0'));assert(nodes.app.innerHTML.includes('تنبيه تلقائي عند بدء الجلسة'));
 click('reminder-new');assertBlank(['title','time']);assert.equal(inputValue('date'),context.Ghars.today());submit({title:'مراجعة الخطة',date:'2099-02-10',time:'10:30',enabled:{checked:true}});assert.equal(current().reminders.length,1);
 click('reminder-edit',current().reminders[0].id);assert.equal(inputValue('title'),'مراجعة الخطة');assert.equal(inputValue('date'),'2099-02-10');assert.equal(inputValue('time'),'10:30');click('modal-close');
 const near=context.Ghars.nowLocal(Date.now()+10*60000),priorCount=current().sessions.length;

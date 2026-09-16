@@ -15,6 +15,10 @@ import android.graphics.Insets;
 import android.media.AudioManager;
 import android.media.RingtoneManager;
 import android.net.Uri;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
@@ -52,7 +56,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Offline-only UI host. No external page ever has access to the native bridge. */
+/** Offline-first UI host. Optional native sync; no external page can access the bridge. */
 public final class MainActivity extends Activity {
     private static final String ORIGIN = "https://ghars.local/";
     private static final int AUTH = 201, EXPORT = 202, IMPORT = 203, REPORT = 204, RINGTONE = 205, NOTIFICATIONS = 206;
@@ -62,9 +66,20 @@ public final class MainActivity extends Activity {
     private WebView web;
     private LinearLayout lockScreen;
     private volatile boolean authenticated, visible, storageHealthy = true;
+    private volatile boolean cloudLoggedIn;
+    private volatile JSONObject pendingCloudLogin;
     private boolean authenticating, authCancelled, loaded, pageReady, pickerActive, destroyed, importConfirmationActive, reloadPending;
     private char[] pendingPassword;
     private String pendingReport, pendingImport;
+    private final Handler syncHandler = new Handler(Looper.getMainLooper());
+    private final Runnable syncTick = new Runnable() {
+        @Override public void run() {
+            if (!visible || destroyed) return;
+            CloudSync.schedule(MainActivity.this, true);
+            syncHandler.postDelayed(this, 60000);
+        }
+    };
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -86,6 +101,11 @@ public final class MainActivity extends Activity {
         root.addView(lockScreen, new FrameLayout.LayoutParams(-1, -1));
         setContentView(root);
         RingingService.channels(this);
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) { CloudSync.schedule(getApplicationContext(), true); }
+        };
+        try { getSystemService(ConnectivityManager.class).registerDefaultNetworkCallback(networkCallback); }
+        catch (Exception ignored) { networkCallback = null; }
         if (state != null && state.getBoolean("pickerActive")) result("permissions", false, "أُلغيت العملية بعد إعادة تشغيل الشاشة؛ أعيدي المحاولة");
     }
 
@@ -152,6 +172,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onResume() {
         super.onResume(); visible = true;
+        syncHandler.removeCallbacks(syncTick); syncHandler.post(syncTick);
         if (!authenticating && !authCancelled) unlock();
         if (authenticated) {
             flushScripts();
@@ -161,6 +182,7 @@ public final class MainActivity extends Activity {
     }
     @Override public void onPause() {
         visible = false;
+        syncHandler.removeCallbacks(syncTick);
         if (lockEnabled()) { authenticated = false; web.setVisibility(View.INVISIBLE); lockScreen.setVisibility(View.VISIBLE); }
         super.onPause();
     }
@@ -187,7 +209,8 @@ public final class MainActivity extends Activity {
         flushScripts();
         if (pendingImport != null && visible) confirmImport();
     }
-    private boolean allowed() { return authenticated && !destroyed; }
+    private boolean deviceAllowed() { return authenticated && !destroyed; }
+    private boolean allowed() { return deviceAllowed() && cloudLoggedIn; }
     static void showAlarmIfVisible() {
         MainActivity activity = current.get();
         if (activity != null && activity.visible) activity.runOnUiThread(() -> {
@@ -195,11 +218,93 @@ public final class MainActivity extends Activity {
         });
     }
 
+    static void cloudRevoked() {
+        MainActivity activity = current.get();
+        if (activity != null) activity.runOnUiThread(() -> {
+            try { if (!ProfileStore.config(activity).optBoolean("revoked")) return; } catch (Exception ignored) { return; }
+            activity.cloudLoggedIn = false; activity.pendingCloudLogin = null;
+            if (activity.pageReady && !activity.destroyed) activity.web.evaluateJavascript("if(window.onCloudSignedOut)window.onCloudSignedOut()", null);
+        });
+    }
+    static void cloudChanged(boolean finished) {
+        MainActivity activity = current.get();
+        if (activity == null || activity.destroyed) return;
+        activity.runOnUiThread(() -> {
+            if (activity.destroyed) return;
+            // A single pending refresh is enough while the app is locked or in the background.
+            if (activity.visible && activity.authenticated && activity.pageReady)
+                activity.web.evaluateJavascript("if(window.onCloudChanged)window.onCloudChanged(" + finished + ")", null);
+        });
+    }
+
     public final class Bridge {
+        @JavascriptInterface public boolean cloudIsLoggedIn() { return allowed(); }
+        @JavascriptInterface public String cloudLoginInfo() { return deviceAllowed() ? CloudSync.loginInfo(MainActivity.this) : "{}"; }
+        @JavascriptInterface public void cloudPrepareLogin(String url, String code) {
+            if (!deviceAllowed()) return;
+            pendingCloudLogin = null;
+            worker.execute(() -> {
+                try {
+                    JSONObject prepared = CloudSync.prepareLogin(getApplicationContext(), url, code);
+                    JSONObject summary = CloudSync.loginSummary(MainActivity.this, prepared);
+                    pendingCloudLogin = prepared;
+                    runOnUiThread(() -> {
+                        if (!destroyed && pageReady && deviceAllowed()) web.evaluateJavascript("if(window.onCloudLogin)window.onCloudLogin(true," + summary.toString() + ")", null);
+                    });
+                } catch (Exception e) {
+                    String detail = readable(e, "تعذر الاتصال؛ تأكدي من الإنترنت ورابط المدرسة");
+                    runOnUiThread(() -> { if (!destroyed && pageReady) web.evaluateJavascript("if(window.onCloudLogin)window.onCloudLogin(false,{message:" + JSONObject.quote(detail) + "})", null); });
+                }
+            });
+        }
+        @JavascriptInterface public String cloudActivate() {
+            if (!deviceAllowed() || pendingCloudLogin == null) return "أدخلي الكود وتحققي منه أولاً";
+            try {
+                JSONObject prepared = pendingCloudLogin; pendingCloudLogin = null;
+                CloudSync.activate(MainActivity.this, prepared); cloudLoggedIn = true; storageHealthy = true;
+                return "";
+            } catch (Exception e) { return readable(e, "تعذر فتح المساحة. لم تُحذف بياناتها"); }
+        }
+        @JavascriptInterface public String cloudSignOut() {
+            if (!deviceAllowed()) return "التطبيق مقفل";
+            try {
+                CloudSync.pause(MainActivity.this); cloudLoggedIn = false; pendingCloudLogin = null;
+                return "";
+            } catch (Exception e) { return readable(e, "تعذر تسجيل الخروج"); }
+        }
+        @JavascriptInterface public String cloudStatus() { return allowed() ? CloudSync.status(MainActivity.this) : "{}"; }
+        @JavascriptInterface public String cloudAction(String action) {
+            if (!allowed() || !storageHealthy) return "افتحي التطبيق وتحققي من سلامة البيانات أولاً";
+            try {
+                switch (action) {
+                    case "enable": CloudSync.enable(MainActivity.this); break;
+                    case "sync": worker.execute(() -> CloudSync.run(getApplicationContext())); break;
+                    case "pause": CloudSync.pause(MainActivity.this); break;
+                    default: return "عملية ربط غير معروفة";
+                }
+                return "";
+            } catch (Exception e) { return readable(e, "تعذرت عملية الربط"); }
+        }
+        @JavascriptInterface public String cloudResolve(String id, String field, String choice, String expectedRemote) {
+            if (!allowed() || !storageHealthy) return "افتحي التطبيق أولاً";
+            try { CloudSync.resolve(MainActivity.this, id, field, choice, expectedRemote); return ""; }
+            catch (Exception e) { return readable(e, "تعذر حل التعارض"); }
+        }
+        @JavascriptInterface public String saveStateMerged(String beforeJson, String editedJson) {
+            if (!allowed() || !storageHealthy) return "{\"error\":\"الحفظ متوقف لحماية البيانات؛ افتحي التطبيق وتحققي من البيانات\"}";
+            try {
+                JSONObject saved = CloudSync.saveEdit(MainActivity.this, beforeJson, editedJson);
+                try { synchronized (CloudSync.DATA_LOCK) { AlarmScheduler.sync(MainActivity.this, AlarmScheduler.itemsForState(CloudSync.state(MainActivity.this))); } }
+                catch (Exception e) { result("permissions", false, "حُفظت البيانات؛ تعذر تحديث المنبهات. راجعي الصلاحيات"); }
+                CloudSync.schedule(MainActivity.this, true);
+                return saved.toString();
+            } catch (Exception e) { return "{\"error\":" + JSONObject.quote(readable(e, "تعذر حفظ البيانات")) + "}"; }
+        }
         @JavascriptInterface public String loadState() {
             if (!allowed()) return "{\"error\":\"التطبيق مقفل\"}";
             try {
-                String json = SecureStore.read(MainActivity.this, "state", SecureStore.EMPTY_STATE);
+                String json;
+                synchronized (CloudSync.DATA_LOCK) { json = SecureStore.read(MainActivity.this, "state", SecureStore.EMPTY_STATE); }
                 SchemaValidator.validate(json); storageHealthy = true; return json;
             } catch (Exception error) {
                 storageHealthy = false;
@@ -207,19 +312,12 @@ public final class MainActivity extends Activity {
             }
         }
         @JavascriptInterface public String saveState(String json) {
-            if (!allowed()) return "افتحي قفل التطبيق أولاً";
-            if (!storageHealthy) return "الحفظ متوقف لحماية البيانات السابقة؛ استعيدي نسخة احتياطية صالحة";
-            try {
-                JSONObject state = SchemaValidator.validate(json);
-                SecureStore.write(MainActivity.this, "state", state.toString());
-                try { AlarmScheduler.sync(MainActivity.this, AlarmScheduler.itemsForState(state)); }
-                catch (Exception error) { result("permissions", false, "حُفظت البيانات، لكن تعذر تحديث المنبّهات؛ افتحي التطبيق مجدداً وراجعي الصلاحيات"); }
-                return "";
-            } catch (Exception error) { return readable(error, "تعذر حفظ البيانات"); }
+            // Reject obsolete JS clients rather than accepting an unversioned full-state overwrite.
+            return "حدّثي ملفات التطبيق كاملة؛ واجهة الحفظ القديمة غير متوافقة مع المزامنة";
         }
         @JavascriptInterface public String syncAlarms(String json) {
             if (!allowed()) return "افتحي قفل التطبيق أولاً";
-            try { AlarmScheduler.sync(MainActivity.this, SchemaValidator.validateAlarms(json)); return ""; }
+            try { synchronized (CloudSync.DATA_LOCK) { AlarmScheduler.sync(MainActivity.this, AlarmScheduler.itemsForState(CloudSync.state(MainActivity.this))); } return ""; }
             catch (Exception error) { return readable(error, "تعذر تحديث المنبّهات"); }
         }
         @JavascriptInterface public long toEpoch(String localDateTime) { return SchemaValidator.toEpoch(localDateTime); }
@@ -393,13 +491,8 @@ public final class MainActivity extends Activity {
                 .setOnCancelListener(dialog -> { pickerActive = false; importConfirmationActive = false; result("importBackup", false, "أُلغيت الاستعادة؛ لم تتغير البيانات"); })
                 .setPositiveButton("استبدال واستعادة", (dialog, which) -> worker.execute(() -> {
                     try {
-                        SchemaValidator.validate(json);
-                        if (storageHealthy) {
-                            String old = SecureStore.read(this, "state", SecureStore.EMPTY_STATE);
-                            SecureStore.write(this, "before-import", old);
-                        }
-                        SecureStore.write(this, "state", json); storageHealthy = true;
-                        String message = "اكتملت الاستعادة بنجاح";
+                        CloudSync.restore(this, json, storageHealthy); storageHealthy = true;
+                        String message = "اكتملت الاستعادة وتوقفت المزامنة. راجعي الربط قبل إعادة تفعيله";
                         try { AlarmScheduler.clear(this); AlarmScheduler.reconcile(this); }
                         catch (Exception alarmError) { message += "؛ راجعي إعدادات المنبّهات"; }
                         result("importBackup", true, message);
@@ -448,6 +541,8 @@ public final class MainActivity extends Activity {
     }
     @Override public void onDestroy() {
         destroyed = true; visible = false; clearPicker(); worker.shutdown();
+        syncHandler.removeCallbacks(syncTick);
+        if (networkCallback != null) try { getSystemService(ConnectivityManager.class).unregisterNetworkCallback(networkCallback); } catch (Exception ignored) { }
         if (web != null) { web.removeJavascriptInterface("Native"); web.destroy(); }
         if (current.get() == this) current.clear();
         super.onDestroy();

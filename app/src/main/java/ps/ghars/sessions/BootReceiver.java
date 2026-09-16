@@ -13,7 +13,7 @@ public final class BootReceiver extends BroadcastReceiver {
             && !"android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED".equals(action)) return;
         PendingResult result = goAsync();
         new Thread(() -> {
-            try { AlarmScheduler.reconcile(context); }
+            try { AlarmScheduler.reconcile(context); CloudSync.schedule(context, true); }
             catch (Exception error) { RingingService.showFailure(context); }
             finally { result.finish(); }
         }, "ghars-reschedule").start();
